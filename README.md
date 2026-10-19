@@ -10,12 +10,7 @@
 
 DVB-S / DVB-S2 video transmitter using the ESP32-S3's own 2.4 GHz RF hardware.
 
-## How it works
 
-The PC uses FFmpeg to make an MPEG transport stream, applies DVB-S or DVB-S2 encoding,
-and sends symbols over native USB. The ESP32-C3 applies a root-raised-cosine filter
-(roll-off 0.35) and writes I/Q samples directly to the Wi-Fi DAC. The chip's RF block
-produces the transmitted signal; no external modulator is needed.
 
 Common symbol rates:
 
