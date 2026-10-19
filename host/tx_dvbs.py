@@ -47,7 +47,10 @@ import esp_link  # noqa: E402
 from tx_media import (build_media_command, encoding_settings, validate_source,
                       DEFAULT_SERVICE_NAME, DEFAULT_SERVICE_PROVIDER, validate_service_metadata)
 
+CHIPS = ("esp32c3", "esp32s3")
 CPU_HZ = 160_000_000
+HAS_ASM = True                     # ESP32-C3: hand-scheduled 8 / 6.67 MS/s loops; the ESP32-S3 port has only the C loops
+S3_QPSK_MIN_PERIOD = 60            # ESP32-S3 QPSK C loop: 4 MS/s at 240 MHz, as the C3 fallback loops
 P8_MIN_PERIOD = 75                 # floor interval, including fractional-deadline overhead in the C loop
 A16_MIN_PERIOD = 80                # measured margin for symbol, sample-clock and USB work
 A32_MIN_PERIOD = 100               # slower 32APSK C path; 250 kS/s has a dedicated 8 MS/s loop
@@ -158,10 +161,20 @@ class TsSource:
             self.reader.join(timeout=.5)
 
 
+def use_chip(chip):
+    """Select the firmware timing model: ESP32-C3 at 160 MHz with assembly loops, or ESP32-S3 at 240 MHz with C loops only."""
+    global CPU_HZ, HAS_ASM
+    if chip not in CHIPS:
+        raise ValueError(f"--chip: {', '.join(CHIPS)}")
+    CPU_HZ, HAS_ASM = (160_000_000, True) if chip == "esp32c3" else (240_000_000, False)
+
+
 def auto_sps(baud):
     """Samples per symbol. The firmware has hand-scheduled loops that update the DAC every 20 CPU cycles (8 MS/s) or 24 cycles
     (6.67 MS/s): sps = 8 at exactly 1 MBd, and for 16..232 samples per symbol the one of the two periods that gets the symbol rate
     closest (within 1 %); other rates use the C loops at up to 4 MS/s. The firmware derives the period from baud * sps the same way."""
+    if not HAS_ASM:
+        return next((sps for sps in (16, 8, 4) if CPU_HZ // (baud * sps) >= S3_QPSK_MIN_PERIOD), 4)
     if baud == 1_000_000:
         return 8
     best = None
@@ -178,12 +191,12 @@ def auto_sps(baud):
 
 def auto_sps_16apsk(baud):
     """Use 8 SPS at 1 MBd, 16..24 SPS near 8 MS/s, or a 4..24-SPS rational C clock."""
-    if baud == 1_000_000:
+    if baud == 1_000_000 and HAS_ASM:
         return 8
     if not 2000 <= baud <= 500_000:
-        raise SystemExit("16APSK: --baud must be 2000 .. 500000 Bd or 1000000 Bd")
+        raise SystemExit("16APSK: --baud must be 2000 .. 500000 Bd" + (" or 1000000 Bd" if HAS_ASM else ""))
     sps = round(CPU_HZ / (20 * baud))
-    if 16 <= sps <= 24 and abs(CPU_HZ / (20 * sps) / baud - 1) <= 0.01:
+    if HAS_ASM and 16 <= sps <= 24 and abs(CPU_HZ / (20 * sps) / baud - 1) <= 0.01:
         return sps
     for sps in range(24, 3, -1):
         if CPU_HZ // (baud * sps) >= A16_MIN_PERIOD:
@@ -196,7 +209,7 @@ def auto_sps_32apsk(baud):
     six-tap C loop with 4..64 SPS and fractional deadlines, at most 1.6 MS/s."""
     if not 2000 <= baud <= A32_MAX_BAUD:
         raise SystemExit(f"32APSK: --baud must be 2000 .. {A32_MAX_BAUD} Bd (one USB byte per symbol)")
-    if baud == 250000:
+    if baud == 250000 and HAS_ASM:
         return 8000000 // baud
     for sps in range(64, 3, -1):
         if CPU_HZ // (baud * sps) >= A32_MIN_PERIOD:
@@ -208,14 +221,16 @@ def auto_sps_8psk(baud):
     """8PSK runs at 8 MS/s in the assembly loops (lutg_psk8.S: 16..64 samples per symbol, i.e. 125..500 kBd, the rate within 1 %; lutg_p8s8.S: 1 MBd, 8 samples
     per symbol, 3 bits per symbol on the USB link). Below 125 kBd the tables of 1024 x S bytes would not fit at 8 MS/s: a C loop with a slower DAC (a store every
     75 or more cycles) takes S = 16..64 samples per symbol. Fractional cycle deadlines give the requested average rate."""
-    if baud == 1_000_000:
+    if baud == 1_000_000 and HAS_ASM:
         return 8
     sps = round(CPU_HZ / (20 * baud))
-    if 16 <= sps <= 64 and abs(CPU_HZ / (20 * sps) / baud - 1) <= 0.01:
+    if HAS_ASM and 16 <= sps <= 64 and abs(CPU_HZ / (20 * sps) / baud - 1) <= 0.01:
         return sps
     for sps in range(64, 15, -1):
         if CPU_HZ // (baud * sps) >= P8_MIN_PERIOD:
             return sps
+    if not HAS_ASM:
+        raise SystemExit(f"8PSK on the ESP32-S3: --baud up to {CPU_HZ // P8_MIN_PERIOD // 16} Bd (C loop, 16..64 samples per symbol)")
     raise SystemExit(f"8PSK: --baud must be 1000000, {CPU_HZ // 20 // 64} .. {CPU_HZ // 20 // 16} Bd (8 MS/s) or below that down to about 10000 Bd (slower DAC, a C loop), e.g. 1000000, 500000, 250000, 125000, 66000, 33000")
 
 
@@ -223,6 +238,8 @@ def output_baud(baud, sps, modulation):
     """Match sample-clock averaging in the PSK/APSK C loops and symbol-clock averaging in the generic assembly loops."""
     sample_hz = baud * sps
     period = (CPU_HZ + sample_hz // 2) // sample_hz
+    if not HAS_ASM:
+        return float(baud) if modulation != "qpsk" else CPU_HZ / (period * sps)
     if modulation == "8psk" and period != 20 and 16 <= sps <= 64 and CPU_HZ // sample_hz >= P8_MIN_PERIOD:
         return float(baud)
     if modulation == "16apsk" and period != 20 and 4 <= sps <= 24 and CPU_HZ // sample_hz >= A16_MIN_PERIOD:
@@ -260,6 +277,8 @@ def feed_symbols(ready, stop_enc, src, enc, cw_byte=None):
 
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--chip", choices=CHIPS, default=os.environ.get("ESP32_DATV_CHIP", "esp32c3"),
+                    help="board: esp32c3 (default) or esp32s3 (experimental, C loops only); default from $ESP32_DATV_CHIP")
     ap.add_argument("--freq", type=float, default=2402.000, help="centre of the spectrum [MHz] (13 cm band)")
     ap.add_argument("--baud", type=int, default=1000000, help="symbol rate [Bd], 2000..1000000 (e.g. 33000 for narrow-band DATV)")
     ap.add_argument("--fec", default="1/2", help="code rate: DVB-S 1/2 2/3 3/4 5/6 7/8; with --dvbs2 1/4 1/3 2/5 1/2 3/5 2/3 3/4 4/5 5/6 8/9 9/10 (short frames: no 9/10)")
@@ -317,6 +336,7 @@ class Transmission:
 
 def resolve_transmission(a):
     """Resolve automatic settings and validate before opening USB or a source."""
+    use_chip(a.chip)
     validate_service_metadata(a.service_name, a.service_provider)
     if not all(math.isfinite(v) for v in (a.freq, a.ppm, a.seconds, a.fps, a.camera_fps)):
         raise ValueError("Frequency, correction and timing values must be finite")
@@ -342,20 +362,28 @@ def resolve_transmission(a):
         a.sps = auto_sps_32apsk(a.baud) if a.mod == "32apsk" else auto_sps_16apsk(a.baud) if a.mod == "16apsk" else auto_sps_8psk(a.baud) if a.mod == "8psk" else auto_sps(a.baud)
     if not 4 <= a.sps <= 232:
         raise ValueError("Samples per symbol must be 4..232, or 0 for automatic")
-    a32fast = a.mod == "32apsk" and (a.baud, a.sps) == (250000, 32)
+    if not HAS_ASM:
+        floor = CPU_HZ // (a.baud * a.sps)
+        ok = {"qpsk": a.sps in (4, 8, 16) and floor >= S3_QPSK_MIN_PERIOD,
+              "8psk": 16 <= a.sps <= 64 and floor >= P8_MIN_PERIOD,
+              "16apsk": 4 <= a.sps <= 24 and floor >= A16_MIN_PERIOD and a.baud <= 500_000,
+              "32apsk": 4 <= a.sps <= 64 and floor >= A32_MIN_PERIOD}[a.mod]
+        if not ok:
+            raise ValueError(f"Unsupported {a.mod.upper()} sampling on the ESP32-S3; use automatic SPS or a lower symbol rate")
+    a32fast = HAS_ASM and a.mod == "32apsk" and (a.baud, a.sps) == (250000, 32)
     if a.mod == "32apsk" and (a.sps > 64 or (not a32fast and CPU_HZ // (a.baud * a.sps) < A32_MIN_PERIOD)):
         raise ValueError("32APSK: use 32 SPS at 250 kS/s, or 4..64 SPS with at least 100 cycles per sample")
-    a16s8 = a.mod == "16apsk" and a.baud == 1000000
+    a16s8 = HAS_ASM and a.mod == "16apsk" and a.baud == 1000000
     if a16s8 and a.sps != 8:
         raise ValueError("16APSK at 1 MS/s requires 8 SPS")
     sample_hz = a.baud * a.sps
     period = (CPU_HZ + sample_hz // 2) // sample_hz
     floor = CPU_HZ // (a.baud * a.sps)
-    if a.mod == "16apsk" and not a16s8 and not (16 <= a.sps <= 24 and period == 20) and not (4 <= a.sps <= 24 and floor >= A16_MIN_PERIOD):
+    if HAS_ASM and a.mod == "16apsk" and not a16s8 and not (16 <= a.sps <= 24 and period == 20) and not (4 <= a.sps <= 24 and floor >= A16_MIN_PERIOD):
         raise ValueError("Unsupported 16APSK sampling; use automatic SPS")
-    if a.mod == "8psk" and not (a.sps == 8 and period == 20) and not (16 <= a.sps <= 64 and (period == 20 or floor >= P8_MIN_PERIOD)):
+    if HAS_ASM and a.mod == "8psk" and not (a.sps == 8 and period == 20) and not (16 <= a.sps <= 64 and (period == 20 or floor >= P8_MIN_PERIOD)):
         raise ValueError("Unsupported 8PSK sampling; use automatic SPS")
-    if a.mod == "qpsk" and not ((a.sps == 8 and period == 20) or (16 <= a.sps <= 232 and period in (20, 24)) or (a.sps in (4, 8, 16) and period >= 16)):
+    if HAS_ASM and a.mod == "qpsk" and not ((a.sps == 8 and period == 20) or (16 <= a.sps <= 232 and period in (20, 24)) or (a.sps in (4, 8, 16) and period >= 16)):
         raise ValueError("Unsupported QPSK sampling; use automatic SPS")
     if not a.target:
         a.target = 6000 if a.mod == "8psk" and a.sps == 8 else (7000 if a16s8 else 2500) if a.mod == "16apsk" else 3500 if a32fast else 2500 if a.mod == "32apsk" else 3000
@@ -427,6 +455,8 @@ def main(argv=None):
     stop_enc = threading.Event()
     try:
         link = esp_link.Link(esp_link.find_port(a.port))
+        if link.chip != a.chip:
+            raise SystemExit(f"The board runs {link.chip} firmware; use --chip {link.chip} (or ESP32_DATV_CHIP={link.chip})")
         src.check()
         link.configure_pa(a.pa_enable)
         secs = min(86400, math.ceil(a.seconds) + 30) if a.seconds else 86400

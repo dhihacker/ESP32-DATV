@@ -1,0 +1,3 @@
+# The C loops count CPU cycles: run at full speed on one core, as on the C3 (interrupts are masked while streaming).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_UNICORE=y

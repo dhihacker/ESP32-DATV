@@ -2,6 +2,12 @@
 
 # ESP32-DATV
 
+> **Fork with experimental ESP32-S3 support.** The original project, by SP8ESA, is
+> [github.com/SP8ESA/ESP32-DATV](https://github.com/SP8ESA/ESP32-DATV). All of the
+> transmitter design and the ESP32-C3 firmware come from there. This fork adds an ESP32-S3 build
+> (see [ESP32-S3](#esp32-s3-experimental-untested-on-air)) and prebuilt S3 firmware in
+> [`firmware/prebuilt/esp32s3`](firmware/prebuilt/esp32s3).
+
 DVB-S / DVB-S2 video transmitter using the ESP32-C3's own 2.4 GHz RF hardware.
 
 ## How it works
@@ -52,6 +58,38 @@ Replace `/dev/ttyACM0` with your board's port if necessary.
 Prebuilt firmware is available in [Releases](https://github.com/SP8ESA/ESP32-DATV/releases/latest).
 Download the firmware ZIP, unzip it and run `./flash.sh /dev/ttyACM0`
 (requires `python3 -m pip install esptool`). The bundle targets ESP32-C3 with 4 MB flash.
+For the ESP32-S3, this fork has prebuilt firmware in `firmware/prebuilt/esp32s3`: run
+`./flash.sh /dev/ttyACM0` there.
+
+### ESP32-S3 (experimental, untested on air)
+
+The same firmware also builds for the ESP32-S3:
+
+```sh
+cd firmware
+idf.py set-target esp32s3
+idf.py -p /dev/ttyACM0 build flash
+```
+
+Use the board's native USB port (the one wired to GPIO19/20, shown as `Espressif USB JTAG/serial debug unit`),
+not a USB-UART bridge port. Then pass `--chip esp32s3` to `host/tx_dvbs.py`, or set
+`ESP32_DATV_CHIP=esp32s3` (this also works for the GUI). The host refuses to transmit if `--chip` does not match the
+board.
+
+The S3 port uses the S3 addresses found in its PHY library (DAC data at `0x3FCD0000`, RF bank owner register
+`0x600C101C`, `g_phyFuns[47]`). It has not been verified with a spectrum analyser yet. The C3 loops are RISC-V
+assembly, so the S3 build runs every mode through the C loops at 240 MHz on one core:
+
+| Modulation | ESP32-S3 symbol rates |
+|---|---|
+| QPSK | 2 kS/s – 1 MS/s (4/8/16 SPS, at most 4 MS/s) |
+| 8PSK | 2 – 200 kS/s |
+| 16APSK | 2 – 500 kS/s |
+| 32APSK | 2 – 250 kS/s |
+
+The per-sample cycle budgets are the C3 values and have not been measured on the S3. Check `late_slots` in the
+`TX END` line. GPIO3 (PA enable) is also an S3 strapping pin; it is only read at reset when JTAG source selection is
+burned into eFuse.
 
 ## Usage
 

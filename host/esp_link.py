@@ -45,6 +45,7 @@ class Link:
         fields = info.split()[2:]
         capabilities = dict(zip(fields[::2], fields[1::2]))
         self.pa_gpio = int(capabilities["PA_GPIO"]) if "PA_GPIO" in capabilities else None
+        self.chip = capabilities.get("CHIP", "esp32c3")      # older firmware: C3 only
         self.s.reset_input_buffer()
         self.buf = b""
         self.text = b""
