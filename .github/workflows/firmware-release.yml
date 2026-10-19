@@ -1,0 +1,90 @@
+name: Firmware release
+
+# Push a tag such as v0.2 to build the firmware and publish it as a release.
+# "Run workflow" on the Actions tab builds the same files as a downloadable artifact only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [esp32s3, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware (${{ matrix.target }})
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: ${{ matrix.target }}
+          path: firmware
+          command: >-
+            idf.py set-target ${{ matrix.target }} && idf.py build &&
+            cd build && python -m esptool --chip ${{ matrix.target }} merge-bin
+            -o esp32-datv-${{ matrix.target }}-merged.bin @flash_args
+
+      - name: Package
+        run: |
+          T=${{ matrix.target }}
+          B=firmware/build
+          D=esp32-datv-$T-firmware
+          mkdir -p dist/$D
+          cp $B/bootloader/bootloader.bin $B/partition_table/partition-table.bin $B/esp32_datv.bin dist/$D/
+          cp $B/esp32-datv-$T-merged.bin dist/
+          cp dist/esp32-datv-$T-merged.bin dist/$D/
+          cat > dist/$D/flash.sh <<EOF
+          #!/bin/sh
+          # Flash ESP32-DATV ($T) through the board's native USB port.
+          # Usage: ./flash.sh /dev/ttyACM0      (needs: python3 -m pip install esptool)
+          set -e
+          PORT=\${1:-/dev/ttyACM0}
+          cd "\$(dirname "\$0")"
+          python3 -m esptool --chip $T -p "\$PORT" -b 460800 --before default-reset --after hard-reset \\
+              write-flash --flash-mode dio --flash-size 4MB --flash-freq 80m \\
+              0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 esp32_datv.bin
+          EOF
+          chmod +x dist/$D/flash.sh
+          (cd dist/$D && sha256sum *.bin > SHA256SUMS)
+          (cd dist && zip -r $D.zip $D && rm -r $D)
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            Firmware for [ESP32-DATV](https://github.com/dhihacker/ESP32-DATV), a fork of
+            [SP8ESA/ESP32-DATV](https://github.com/SP8ESA/ESP32-DATV) with experimental ESP32-S3 support.
+
+            **ESP32-S3 (experimental, not yet tested on air):** download `esp32-datv-esp32s3-firmware.zip`,
+            unzip it and run `./flash.sh /dev/ttyACM0`, or flash `esp32-datv-esp32s3-merged.bin` at `0x0`.
+            Use the board's native USB port and transmit with `python3 host/tx_dvbs.py --chip esp32s3 ...`.
+            Symbol rates: QPSK up to 1 MS/s, 8PSK up to 200 kS/s, 16APSK up to 500 kS/s, 32APSK up to 250 kS/s.
+
+            **ESP32-C3:** `esp32-datv-esp32c3-firmware.zip` / `esp32-datv-esp32c3-merged.bin`, as in the original project.
+
+            All files are for 4 MB flash. Flashing needs `python3 -m pip install esptool`.
