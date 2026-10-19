@@ -7,6 +7,9 @@
 > transmitter design and the ESP32-C3 firmware come from there. This fork adds an ESP32-S3 build
 > (see [ESP32-S3](#esp32-s3-experimental-untested-on-air)) and prebuilt S3 firmware in
 > [`firmware/prebuilt/esp32s3`](firmware/prebuilt/esp32s3).
+>
+> ⚠️ **Not yet tested on ESP32-S3 hardware.** The S3 firmware builds, but it has not been run on a real
+> ESP32-S3 board or checked on air. It may not transmit at all. Reports are welcome.
 
 DVB-S / DVB-S2 video transmitter using the ESP32-S3's own 2.4 GHz RF hardware.
 
