@@ -8,7 +8,7 @@
 > (see [ESP32-S3](#esp32-s3-experimental-untested-on-air)) and prebuilt S3 firmware in
 > [`firmware/prebuilt/esp32s3`](firmware/prebuilt/esp32s3).
 
-DVB-S / DVB-S2 video transmitter using the ESP32-C3's own 2.4 GHz RF hardware.
+DVB-S / DVB-S2 video transmitter using the ESP32-S3's own 2.4 GHz RF hardware.
 
 ## How it works
 
